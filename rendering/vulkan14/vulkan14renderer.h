@@ -488,6 +488,10 @@ class vulkan14_renderer : public gfx_renderer, public gfx::scene_walk
 	// the soft particles (false: they aren't soft)
 	gfx::gpu_particles::view particles_view() const;
 	bool setup_particles_depth(std::size_t const Viewport);
+	// the scene drawn so far copied with its mipmaps for the glasses of the cab (SCENE_COPY_TEX)
+	bool setup_scene_copy(std::size_t const Viewport);
+	// the scene copy is made in this frame (the glasses of the cab read it): its mipmaps, 0 without
+	float scene_copy_levels(std::size_t const Viewport) const;
 	bool m_particlesoft{false};
 	// the grass of the heightmap terrain seen from the main view, over the opaque scene (opengl46_renderer::Render_grass())
 	void render_grass(glm::mat4 const &Future);

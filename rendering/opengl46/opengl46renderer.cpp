@@ -1675,7 +1675,7 @@ void opengl46_renderer::Render_pass(viewport_config &vp, rendermode const Mode)
 					m_glasswet += (1.0 - m_glasswet) * (1.0 - std::exp(-fill_rate * dt * meet));
 				else
 					m_glasswet *= std::exp(-dt * std::log(2.0) / dry_halflife * (1.0 + 2.0 * speed));
-				scene_ubs.rain_state = glm::vec4{static_cast<float>(m_wiperrain), static_cast<float>(m_glasswet), static_cast<float>(fill_rate), 0.f};
+				scene_ubs.rain_state = glm::vec4{static_cast<float>(m_wiperrain), static_cast<float>(m_glasswet), static_cast<float>(fill_rate), Scene_Copy_Levels(vp)};
 			}
 			if (owner != nullptr)
 			{
@@ -1803,16 +1803,14 @@ void opengl46_renderer::Render_pass(viewport_config &vp, rendermode const Mode)
         if (vp.main && !vp.custom_backbuffer) // TODO: update window sizes also for extra viewports
             target_size = Global.fb_size;
 
-		// the motion is blurred only when something in the view moves: the vehicle of the camera, or a vehicle drawn in the last
-		// frame (a vehicle setting off is blurred from its second frame, when its velocity is still far below a pixel). the pass
-		// itself runs in every frame: the windscreens (mat_rain_windscreen, mat_bugs_windscreen) ask it in the velocity target for
-		// the picture in their drops and the haze, also standing still, with the motion blur off and with any anti-aliasing (the
-		// motion is then blurred by 0)
-		auto const moving{
+		// the motion blur only when something in the view moves: the vehicle of the camera, or a vehicle drawn in the last frame.
+		// with nothing moving the velocity is zero everywhere, the blur takes a single sample of each pixel and gives back the
+		// image it was given, so the velocity target, its resolve and the blur are left out and the picture stays the same.
+		// a vehicle setting off is blurred from its second frame, when its velocity is still far below a pixel
+		auto const motionblur{
 		    Global.gfx_postfx_motionblur_enabled
 		    && (m_vehiclesmoved
 		        || ((Global.pCamera.m_owner != nullptr) && (Global.pCamera.m_owner->get_future_movement() != glm::dvec3{0.0})))};
-		auto const motionblur{Global.gfx_motion_vectors() && (vp.main_texv != nullptr)};
 
 		if (!Global.gfx_skippipeline)
 		{
@@ -2040,6 +2038,8 @@ void opengl46_renderer::Render_pass(viewport_config &vp, rendermode const Mode)
 				setup_drawing(true);
                 Render_interior(true);
 			}
+            // what the glasses of the cab see through themselves: the scene drawn so far
+            Setup_Scene_Copy( vp );
             glDebug( "render translucent cab" );
             Render_cab(vehicle, vehicle->InteriorLightLevel, true);
 
@@ -2118,7 +2118,7 @@ if (!Global.gfx_skippipeline)
 				{
 					if (taa)
 						gpupart("motion blur");
-					model_ubs.param[0].x = moving ? m_framerate / (1.0 / Global.gfx_postfx_motionblur_shutter) : 0.0;
+					model_ubs.param[0].x = m_framerate / (1.0 / Global.gfx_postfx_motionblur_shutter);
 					model_ubo->update(model_ubs);
 					m_pfx_motionblur->apply({image, vp.main_texv.get(), vp.main_texd.get()}, vp.main2_fb.get());
 				}
@@ -5401,6 +5401,63 @@ bool opengl46_renderer::Setup_Particles_Depth(viewport_config &Viewport)
 	if (scissor)
 		::glEnable(GL_SCISSOR_TEST);
 	::glBindTextureUnit(gl::SCENE_DEPTH_TEX, Viewport.clusters_depth_tex->id);
+	return true;
+}
+
+// the scene copy is made in this frame, before the glasses of the cab (Setup_Scene_Copy()): its levels for scene_ubs.rain_state.w,
+// which the glasses read it by (windscreen_view.glsl), 0 when they're to see through the history of the reflections instead
+float opengl46_renderer::Scene_Copy_Levels(viewport_config const &Viewport) const
+{
+	if ((false == Viewport.main) || (Viewport.scenecopy_fb == nullptr) || (Viewport.msaa_fb == nullptr) || Global.gfx_skippipeline || Global.bWireFrame ||
+	    FreeFlyModeFlag || (false == Global.render_cab) || (simulation::Train == nullptr))
+		return 0.f;
+	return static_cast<float>(Viewport.scenecopy_levels);
+}
+
+// the scene drawn so far (the opaque one, the translucent world, the rain falling) copied with its mipmaps for the glasses of the cab,
+// which see it through themselves: the drops bend it, the haze blurs it (windscreen_view.glsl). the copy is made with the first one
+// (the glasses of that frame see through the history of the reflections)
+bool opengl46_renderer::Setup_Scene_Copy(viewport_config &Viewport)
+{
+	if (Global.gfx_skippipeline || Global.bWireFrame || (false == Viewport.main) || (Viewport.msaa_fb == nullptr))
+		return false;
+	if ((Viewport.scenecopy_tex != nullptr) && ((Viewport.scenecopy_tex->get_width() != Viewport.width) || (Viewport.scenecopy_tex->get_height() != Viewport.height)))
+	{
+		Viewport.scenecopy_fb.reset();
+		Viewport.scenecopy_tex.reset();
+	}
+	if (Viewport.scenecopy_fb == nullptr)
+	{
+		// the format of the colour drawn, which a blit resolving its samples needs
+		auto texture{std::make_unique<opengl_texture>()};
+		texture->alloc_rendertarget(Global.gfx_format_color, GL_RGB, Viewport.width, Viewport.height, 1, 1, GL_CLAMP_TO_EDGE);
+		auto const levels{static_cast<int>(std::floor(std::log2(static_cast<float>(std::max({Viewport.width, Viewport.height, 1}))))) + 1};
+		::glTextureParameteri(texture->id, GL_TEXTURE_MAX_LEVEL, levels - 1);
+		::glTextureParameteri(texture->id, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+		::glGenerateTextureMipmap(texture->id);
+		auto framebuffer{std::make_unique<gl::framebuffer>()};
+		framebuffer->attach(*texture, GL_COLOR_ATTACHMENT0);
+		if (false == framebuffer->is_complete())
+		{
+			ErrorLog("scene copy framebuffer setup failed, the glasses of the cab see through the history of the reflections");
+			Viewport.msaa_fb->bind();
+			return false;
+		}
+		Viewport.scenecopy_tex = std::move(texture);
+		Viewport.scenecopy_fb = std::move(framebuffer);
+		Viewport.scenecopy_levels = levels;
+	}
+	// the scissor test would limit the blit
+	auto const scissor{::glIsEnabled(GL_SCISSOR_TEST) == GL_TRUE};
+	if (scissor)
+		::glDisable(GL_SCISSOR_TEST);
+	::glBlitNamedFramebuffer(*Viewport.msaa_fb, *Viewport.scenecopy_fb, 0, 0, Viewport.width, Viewport.height, 0, 0, Viewport.width, Viewport.height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+	if (scissor)
+		::glEnable(GL_SCISSOR_TEST);
+	::glGenerateTextureMipmap(Viewport.scenecopy_tex->id);
+	::glBindTextureUnit(gl::SCENE_COPY_TEX, Viewport.scenecopy_tex->id);
+	// the colour pass goes on
+	Viewport.msaa_fb->bind();
 	return true;
 }
 

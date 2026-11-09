@@ -387,8 +387,7 @@ bool make_targets(vk14::allocator &Memory, vk14::deletion_queue &Deletions, std:
 	{
 		ok = ok && make(Targets.motion_image, velocity, sampledcolour, VK_SAMPLE_COUNT_1_BIT, "scene velocity");
 	}
-	// the pass of the motion blur runs in every frame: the windscreens ask it for their drops and haze (see render_post())
-	if (motion)
+	if (motion && Global.gfx_postfx_motionblur_enabled)
 	{
 		ok = ok && make(Targets.blurred, hdr, sampledcolour, VK_SAMPLE_COUNT_1_BIT, "motion blurred", outputextent);
 	}
@@ -1530,7 +1529,7 @@ void vulkan14_renderer::render_viewport(std::size_t const Index)
 				m_glasswet += (1.0 - m_glasswet) * (1.0 - std::exp(-fill_rate * dt * meet));
 			else
 				m_glasswet *= std::exp(-dt * std::log(2.0) / dry_halflife * (1.0 + 2.0 * speed));
-			scene_ubs.rain_state = glm::vec4{static_cast<float>(m_wiperrain), static_cast<float>(m_glasswet), static_cast<float>(fill_rate), 0.f};
+			scene_ubs.rain_state = glm::vec4{static_cast<float>(m_wiperrain), static_cast<float>(m_glasswet), static_cast<float>(fill_rate), scene_copy_levels(Index)};
 		}
 		if (owner != nullptr)
 		{
@@ -1634,7 +1633,7 @@ void vulkan14_renderer::render_viewport(std::size_t const Index)
 		render_ray_scene(vp);
 	}
 
-	// the motion blurred only when something in the view moves (see opengl46_renderer::Render_pass()); the pass runs anyway
+	// the motion blur only when something in the view moves (see opengl46_renderer::Render_pass())
 	auto const motionblur{Global.gfx_postfx_motionblur_enabled && targets.motion &&
 	                      (m_vehiclesmoved || ((Global.pCamera.m_owner != nullptr) && (Global.pCamera.m_owner->get_future_movement() != glm::dvec3{0.0})))};
 
@@ -1806,6 +1805,8 @@ void vulkan14_renderer::render_viewport(std::size_t const Index)
 			walk_blending(true);
 			Render_interior(true);
 		}
+		// what the glasses of the cab see through themselves: the scene drawn so far
+		setup_scene_copy(Index);
 		Render_cab(vehicle, vehicle->InteriorLightLevel, true);
 		setup_shadow_color(m_shadowcolor);
 		if (Global.Overcast > 1.0f)
@@ -2998,6 +2999,114 @@ bool vulkan14_renderer::setup_particles_depth(std::size_t const Index)
 	return true;
 }
 
+// the scene copy is made in this frame, before the glasses of the cab (setup_scene_copy()): its mipmaps for scene_ubs.rain_state.w,
+// which the glasses read it by (windscreen_view.glsl), 0 when they're to see through the history of the reflections instead
+float vulkan14_renderer::scene_copy_levels(std::size_t const Index) const
+{
+	auto const &targets{m_context->scene.targets};
+	if ((Index != 0) || (Index >= targets.size()) || (false == bool(targets[Index].scene_copy)) || Global.gfx_skippipeline || Global.bWireFrame || FreeFlyModeFlag ||
+	    (false == Global.render_cab) || (simulation::Train == nullptr) || (false == m_viewports[Index].main))
+	{
+		return 0.f;
+	}
+	return static_cast<float>(targets[Index].scene_copy->desc().mips);
+}
+
+// the scene drawn so far (the opaque one, the translucent world, the rain falling) copied with its mipmaps for the glasses of the cab,
+// which see it through themselves: the drops bend it, the haze blurs it (windscreen_view.glsl). as setup_particles_depth(): the
+// rendering is ended (which resolves the colour of many samples), the colour copied and its mipmaps made by blits, the rendering
+// begun again. the copy is made with the first one; the pass sets hold it from the next frame (the history of the reflections
+// before)
+bool vulkan14_renderer::setup_scene_copy(std::size_t const Index)
+{
+	auto &ctx{*m_context};
+	auto &targets{ctx.scene.targets[Index]};
+	auto &draw{*m_draw};
+	if (Global.gfx_skippipeline || Global.bWireFrame || (false == draw.rendering) || (false == draw.resume.valid) || (false == bool(targets.colour)) || (Index != 0) ||
+	    (false == m_viewports[Index].main))
+	{
+		return false;
+	}
+	auto const width{static_cast<std::int32_t>(targets.extent.width)};
+	auto const height{static_cast<std::int32_t>(targets.extent.height)};
+	if ((false == bool(targets.scene_copy)) || (targets.scene_copy->desc().extent.width != targets.extent.width) || (targets.scene_copy->desc().extent.height != targets.extent.height))
+	{
+		vk14::image_desc desc;
+		desc.format = ctx.scene.history_format;
+		desc.extent = {targets.extent.width, targets.extent.height, 1};
+		desc.mips = static_cast<std::uint32_t>(std::floor(std::log2(static_cast<float>(std::max(width, height))))) + 1;
+		desc.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+		if (targets.scene_copy)
+		{
+			ctx.deletions.push(ctx.uploads.current_value(), [old = std::move(targets.scene_copy)]() {});
+		}
+		targets.scene_copy = std::make_shared<vk14::image>();
+		if (false == targets.scene_copy->create(ctx.memory, desc, "scene copy"))
+		{
+			ErrorLog("scene copy setup failed, the glasses of the cab see through the history of the reflections");
+			targets.scene_copy.reset();
+			return false;
+		}
+	}
+	auto const commands{m_commands};
+	auto &image{*targets.scene_copy};
+	auto const mips{image.desc().mips};
+	suspend_rendering();
+	vk14::barriers(commands, {vk14::use_of(*targets.colour, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT),
+	                          vk14::use_of(image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT)});
+	auto blit = [&commands, &image](VkImage From, std::uint32_t FromLevel, VkImageLayout FromLayout, std::uint32_t ToLevel, glm::ivec2 const &FromSize, glm::ivec2 const &ToSize) {
+		VkImageBlit2 region{};
+		region.sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2;
+		region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, FromLevel, 0, 1};
+		region.srcOffsets[1] = {FromSize.x, FromSize.y, 1};
+		region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, ToLevel, 0, 1};
+		region.dstOffsets[1] = {ToSize.x, ToSize.y, 1};
+		VkBlitImageInfo2 info{};
+		info.sType = VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2;
+		info.srcImage = From;
+		info.srcImageLayout = FromLayout;
+		info.dstImage = image.handle();
+		info.dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+		info.regionCount = 1;
+		info.pRegions = &region;
+		info.filter = VK_FILTER_LINEAR;
+		commands->blit_image2(&info);
+	};
+	auto barrier = [&commands, &image](std::uint32_t Level, VkImageLayout From, VkImageLayout To, VkPipelineStageFlags2 DstStage, VkAccessFlags2 DstAccess) {
+		VkImageMemoryBarrier2 entry{};
+		entry.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+		entry.srcStageMask = VK_PIPELINE_STAGE_2_BLIT_BIT;
+		entry.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+		entry.dstStageMask = DstStage;
+		entry.dstAccessMask = DstAccess;
+		entry.oldLayout = From;
+		entry.newLayout = To;
+		entry.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		entry.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		entry.image = image.handle();
+		entry.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, Level, 1, 0, 1};
+		VkDependencyInfo dependency{};
+		dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+		dependency.imageMemoryBarrierCount = 1;
+		dependency.pImageMemoryBarriers = &entry;
+		commands->pipeline_barrier2(&dependency);
+	};
+	blit(targets.colour->handle(), 0, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, 0, {width, height}, {width, height});
+	for (std::uint32_t level = 1; level < mips; ++level)
+	{
+		barrier(level - 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+		blit(image.handle(), level - 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, level, {std::max(width >> (level - 1), 1), std::max(height >> (level - 1), 1)}, {std::max(width >> level, 1), std::max(height >> level, 1)});
+	}
+	// the levels read from are in the layout of the sources, the last one in that of the destination: all of them read by the glasses
+	for (std::uint32_t level = 0; level < mips; ++level)
+	{
+		barrier(level, (level + 1 < mips) ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, sampled_stage, sampled_access);
+	}
+	image.state = vk14::image_state{VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, sampled_stage, sampled_access};
+	resume_rendering();
+	return true;
+}
+
 // the smoke of the cpu (opengl46_particles)
 void vulkan14_renderer::render_particles()
 {
@@ -3719,13 +3828,10 @@ void vulkan14_renderer::render_post(std::size_t const Index, bool const Motionbl
 		store_ssr_history(Index, *hdr);
 	}
 	m_ssrframe = false;
-	// the pass of the motion blur in every frame: the windscreens (mat_rain_windscreen, mat_bugs_windscreen) ask it in the velocity
-	// target for the picture in their drops and the haze, also standing still, with the motion blur off and with any anti-aliasing.
-	// the motion is blurred only with Motionblur (by 0 otherwise)
-	if (targets.blurred && targets.motion_image)
+	if (Motionblur && targets.blurred)
 	{
 		vk14::draw_constants constants;
-		constants.data[0].x = Motionblur ? m_framerate / (1.0 / Global.gfx_postfx_motionblur_shutter) : 0.0;
+		constants.data[0].x = m_framerate / (1.0 / Global.gfx_postfx_motionblur_shutter);
 		// with the frames generated by dlss each frame drawn is shown for a part of its time: the blur as much shorter (the guide of
 		// the frame generation)
 		if (m_generationinputs && m_viewports[Index].main)

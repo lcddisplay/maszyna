@@ -102,6 +102,9 @@ namespace gl
     // the probe of the cab drawn last, a small level of its albedo, which the drawing of the probe reads to tell where the windows of
     // the cab are (gfx::cab_probe, gl::scene_ubs::cab_probe_sun). bound directly, like the ones above
     const size_t CAB_PROBE_MASK_TEX = MAX_TEXTURES + HELPER_TEXTURES + 19;
+    // the scene of the main view copied with its mipmaps before the glasses of the cab are drawn, which they see through (the drops bend
+    // it, the haze blurs it: mat_rain_windscreen, mat_bugs_windscreen, windscreen_view.glsl, scene_ubs::rain_state.w). bound directly
+    const size_t SCENE_COPY_TEX = MAX_TEXTURES + HELPER_TEXTURES + 20;
 
     struct scene_ubs
     {

@@ -31,11 +31,11 @@
 //   - drops act as small lenses: the pixel shows the scene on the opposite side of the drop centre, so every drop holds a
 //     small, flipped picture (drop_lens); rivulets bend the view by Snell's law from their normal,
 //   - bright lights near a drop (signals, lamps, headlights) show up in it,
-//   Works standing still, with the motion blur off and with taa. Needs gfx.ssr (default: medium); without it the drops show
-//   the sky / ground only, faintly.
-// The haze of the wet glass is blurred by the post-processing, from the picture of this frame: the glass writes a request
-// into the velocity target (x = 64 * strength, y = 0) and postfx_taa.frag (with gfx.antialiasing taa: every frame) or
-// postfx_motionblur.frag (without it: only while something moves) blur the picture there (rain_windscreen_haze.glsl).
+//   Works standing still, with the motion blur off and with any anti-aliasing.
+// What is seen through the glass: the scene of this frame copied with its mipmaps just before the glasses of the cab are drawn
+// (windscreen_view.glsl): the haze blurs it and the drops bend it right in the glass, with any anti-aliasing, moving or not;
+// nothing of the post-processing knows about the glass. Without the copy (the views without the cab) the drops show the image of
+// the last frame (gfx.ssr) and there's no haze.
 //
 // Speed: the air against the vehicle (rain_wind) drives the water: at speed a second layer of rivulets runs along its push
 // (up a front glass, back along a side window) and sweeps the drops up on its way, the drops are stretched along the push,
@@ -48,6 +48,8 @@
 layout(location = 0) in vec3 f_normal;
 layout(location = 2) in vec2 f_coord;
 layout(location = 3) in vec4 f_pos;
+layout(location = 4) in vec4 f_clip_pos;
+layout(location = 5) in vec4 f_clip_future_pos;
 
 layout(location = 0) out vec4 out_color;
 
@@ -74,6 +76,7 @@ layout(location = 1) out vec4 out_motion;
 #include "tonemapping.glsl"
 #include "random.glsl"
 #include "rain_cells.glsl"
+#include "windscreen_view.glsl"
 
 layout(set = MATERIAL_SET, binding = MATERIAL_TEXTURE_FIRST + 0) uniform sampler2D diffuse;
 layout(set = MATERIAL_SET, binding = MATERIAL_TEXTURE_FIRST + 1) uniform sampler2D raindropsatlas;
@@ -88,9 +91,6 @@ const float blur_amount   = 1.0;            // strength of the haze: 0 = off, 1 
 const float haze_fill  = 12.0;              // rain fallen since the blade to mist the glass up fully: seconds of the heaviest
                                             // rain standing still (2x as long at 1.5; the speed counted in by the game)
 const float haze_curve = 1.0;               // > 1: slow at first, then more and more
-const float WS_BEND_ENC   = 60.0;           // the drop request in the velocity target; must match rain_windscreen_haze.glsl
-const float WS_DROP_BIAS  = 192.0;
-const float WS_ENC        = 64.0;           // the haze request in the velocity target; must match rain_windscreen_haze.glsl
 
 // --- How the water gathers on the glass ------------------------------------------------------------------
 // the game counts the rain the glass meets (rain_state, gl::scene_ubs; more at speed) and how wet the glass is (0 dry .. 1 as full
@@ -1020,17 +1020,21 @@ void main()
             background = (projection[3][2] / depth) / max(-wsView.z, 0.05);
     }
     vec4 under = vec4(0.0);                      // the blurred view under the drops (not premultiplied)
-    vec4 bent  = vec4(0.0);                      // the view bent by the drops, laid over everything (as the old postfx did)
+    vec4 bent  = vec4(0.0);                      // the view bent by the drops, laid over everything
 
-    // the haze is blurred by the post-processing (postfx_taa.frag / postfx_motionblur.frag, rain_windscreen_haze.glsl): the
-    // picture of this frame can't be read here, and one of the last frame laid over it only shows a milky ghost of the scene
+    // the haze: the scene of this frame blurred right in the glass (windscreen_view.glsl), under the drops; full from a quarter of the
+    // haze on, as it always was. without the copy of the scene (the views without the cab) no haze: the image of the last frame laid
+    // over the scene only shows a milky ghost of it
     float blurAmt = clamp(hazeWeight * blur_amount, 0.0, 1.0);
+    float hazeA   = min(blurAmt * 4.0, 1.0) * glassClear;
+    if (wsvCopy() && (hazeA > 0.0025))
+        under = vec4(wsvHaze(wsvUV(gl_FragCoord.xy), blurAmt), hazeA);
 
-    // the drops: the view bent (the picture shift worked out above), and the lights near them. with the motion vectors the
-    // post-processing bends the picture of this frame (postfx_taa.frag / postfx_motionblur.frag, rain_windscreen_haze.glsl): it has
-    // the depth of the cab and never pulls the dashboard or the roof into a drop. the image of the last frame is only the fallback
+    // the drops: the view bent (the picture shift worked out above), and the lights near them. the scene of this frame (its copy,
+    // windscreen_view.glsl), whose depth tells the dashboard, the frame and the roof of the cab, which are never pulled into a drop;
+    // the image of the last frame is only the fallback (the views without the cab)
     float refrA = smoothstep(0.05, 0.35, coverA) * glassClear * step(glassA, 0.5);
-    if ((false == MOTIONBLUR_ENABLED) && (refrA > 0.001))
+    if (refrA > 0.001)
     {
         vec2  shiftPx = -lensBend * WS_REFR_MAXPX;                         // where the drop looks, screen pixels
         vec3  dir     = normalize(wsView + shiftPx.x * wsDvx + shiftPx.y * wsDvy);
@@ -1038,9 +1042,25 @@ void main()
         float lod     = clamp(log2(1.0 + lensK * drop_lens_mix) - 0.5, 0.0, 3.0)
                       + clamp(2.5 - log2(max(lensRadPx, 1.0)), 0.0, 1.5);
         float share;
-        vec3  seen    = wsBehind(dir, lod, background, share, true);
-        if (image && (WS_LIGHT_GAIN > 0.0))
-            seen += wsLightGlow(wsView, background);
+        vec3  seen;
+        if (wsvCopy())
+        {
+            vec2  uv    = wsvUV(gl_FragCoord.xy + shiftPx);
+            vec2  edges = min(uv, 1.0 - uv);
+            uv    = clamp(uv, vec2(0.0), vec2(1.0));
+            share = smoothstep(0.0, 0.04, min(edges.x, edges.y)) * (wsvInside(uv) ? 0.0 : 1.0);
+            seen  = mix(wsSurroundings(dir, lod), wsvFetch(uv, lod), share);
+            // the glow only in the drops themselves, strongest in their middle where the lens bends most (the water film and the
+            // rivulets between them would show it as flat squares around the headlights of an oncoming train)
+            seen += wsvLightGlow(uv) * (smoothstep(0.03, 0.2, length(lensBend * smoothstep(0.05, 0.35, coverA))) * share);
+            image = true;
+        }
+        else
+        {
+            seen = wsBehind(dir, lod, background, share, true);
+            if (image && (WS_LIGHT_GAIN > 0.0))
+                seen += wsLightGlow(wsView, background);
+        }
         // without the image the surroundings stand in: only faintly, they aren't the scene behind
         bent = vec4(seen, refrA * WS_REFR_MIX * (image ? 1.0 : 0.3));
     }
@@ -1073,21 +1093,13 @@ void main()
     if (!POSTFX_ENABLED)
         out_color = tonemap(out_color);
 
-    // the velocity target: on the drops the picture shift (x, y = WS_DROP_BIAS + WS_BEND_ENC * bend), on the hazy glass the request
-    // for the haze (x = WS_ENC * strength, y = 0); elsewhere the velocity of the scene behind the glass stays as it is (alpha 0)
+    // the velocity of the glass, as any material writes it, over what the scene behind wrote (the haze and the drops go with the
+    // glass, the scene seen clearly through it keeps its own)
     if (MOTIONBLUR_ENABLED)
     {
-        vec4 req = vec4(0.0);
-        bool drop = (coverA > 0.05 || alphaOut > 0.05) && (glassA < 0.5);
-        float blurMask = blurAmt * glassClear;
-        if (drop)
-        {
-            vec2 bend = lensBend * smoothstep(0.05, 0.35, coverA);
-            req = vec4(WS_DROP_BIAS + WS_BEND_ENC * bend.x, WS_DROP_BIAS + WS_BEND_ENC * bend.y, 0.0, 1.0);
-        }
-        else if (blurMask >= 0.01)
-            req = vec4(WS_ENC * blurMask, 0.0, 0.0, 1.0);
-        out_motion = req;
+        vec2 a = (f_clip_future_pos.xy / f_clip_future_pos.w) * 0.5 + 0.5;
+        vec2 b = (f_clip_pos.xy / f_clip_pos.w) * 0.5 + 0.5;
+        out_motion = vec4(a - b, 0.0, clamp(out_color.a, 0.0, 1.0));
     }
 }
 

@@ -3,9 +3,9 @@
 #include "common.glsl"
 // Windscreen bugs (spring / summer) - v3 (OpenGL 4.6 / Vulkan 1.4 port of the OpenGL 3.3 v2)
 //   v3: the syntax of the 4.6 renderers (explicit locations and bindings, #pragma texture / param, the settings as constants);
-//       the tuning values are constants (a uniform can't have a default any more); the blur ring goes to the post-processing
-//       through the velocity target as the haze of rain_windscreen does (postfx_taa.frag / postfx_motionblur.frag with
-//       rain_windscreen_haze.glsl); the colour is written straight (not premultiplied), as rain_windscreen of the 4.6 renderers
+//       the tuning values are constants (a uniform can't have a default any more); the blur ring is drawn in the glass from the
+//       copy of the scene made before the glasses of the cab (windscreen_view.glsl), as the haze of rain_windscreen; the colour is
+//       written straight (not premultiplied), as rain_windscreen of the 4.6 renderers
 //       writes the glass; the gloss of the glass from legacy_gloss(); no lighting where the glass is clear (no bug, clear texture)
 //   v2: cells without a bug are skipped before the wiper mask is read (the mask used to be read for all
 //       18 cells of both layers on every pixel); the fine specks are procedural (no texture reads, only the
@@ -66,6 +66,8 @@
 layout(location = 0) in vec3 f_normal;
 layout(location = 2) in vec2 f_coord;
 layout(location = 3) in vec4 f_pos;
+layout(location = 4) in vec4 f_clip_pos;
+layout(location = 5) in vec4 f_clip_future_pos;
 
 layout(location = 0) out vec4 out_color;
 #ifdef NO_MOTION_OUTPUT
@@ -90,6 +92,7 @@ layout(location = 1) out vec4 out_motion;
 #include "apply_fog.glsl"
 #include "tonemapping.glsl"
 #include "random.glsl"
+#include "windscreen_view.glsl"
 
 layout(set = MATERIAL_SET, binding = MATERIAL_TEXTURE_FIRST + 0) uniform sampler2D diffuse;
 layout(set = MATERIAL_SET, binding = MATERIAL_TEXTURE_FIRST + 1) uniform sampler2D raindropsatlas;
@@ -108,7 +111,7 @@ const float bugs_wiper_clean = 1.0;    // 1 = wipers wipe the bugs off (uses wip
 const float bugs_gloss = 0.45;   // shininess of the wet splats (sun / headlight glints on the bumps), 0 = matt
 const float bugs_bump = 1.0;    // strength of the 3D relief from the normal map, 0 = flat
 const float bugs_halo_blur = 0.8;    // blur of the scene seen through the see-through parts of a bug (its texture half transparent: wings,
-                                     // the thin smear of the splat), none around it (0 = off, 1 = full); done in the post-processing
+                                     // the thin smear of the splat), none around it (0 = off, 1 = full); drawn in the glass
 const float bugs_halo_size = 1.15;   // ring radius = bug half-size * this (1 = only under the splat, max 1.6)
 const float bugs_halo_px = 60.0;   // a bug this many pixels wide on screen gets the full blur, smaller ones less (the blur radius is fixed in pixels)
 const float bugs_vertical = 0.0;    // -1..1: more dirt at the bottom (<0) or at the top (>0) of the pane, 0 = even
@@ -123,7 +126,6 @@ const float BUG_SIZE_MIN  = 0.6;    // bug size in grid cells (keep max <= 1.2, 
 const float BUG_SIZE_MAX  = 1.2;
 const float BUG_FADE_TIME = 0.15;   // seconds a splat takes to appear (a quick splat)
 const float SPECK_SCALE   = 2.5;    // speck grid = raindrop_grid_size * this
-const float WS_ENC        = 64.0;   // must match rain_windscreen_haze.glsl
 
 // Match the way rain_windscreen draws the glass itself (colour premultiplied by
 // alpha, then alpha-blended), so the pane looks identical in summer and in rain.
@@ -466,6 +468,22 @@ void main()
 
     out_color = POSTFX_ENABLED ? color : tonemap(color);
 
+    // the scene seen through the see-through parts of the bugs (smear) blurred right in the glass (windscreen_view.glsl), under
+    // them; none over the opaque parts of the pane (1 - glassA), none without the copy of the scene (the views without the cab)
+    float blurMask = clamp(smear * bugs_halo_blur * (1.0 - smoothstep(0.5, 0.95, glassA)), 0.0, 1.0);
+    if (wsvCopy() && (blurMask >= 0.01))
+    {
+        vec4 haze = vec4(wsvHaze(wsvUV(gl_FragCoord.xy), blurMask), min(blurMask * 4.0, 1.0));
+        if (!POSTFX_ENABLED)
+            haze = tonemap(haze);
+#if BUGS_MATCH_RAIN_GLASS
+        out_color = vec4(out_color.rgb + haze.rgb * haze.a * (1.0 - out_color.a), out_color.a + haze.a * (1.0 - out_color.a));
+#else
+        float a = out_color.a + haze.a * (1.0 - out_color.a);
+        out_color = vec4((out_color.rgb * out_color.a + haze.rgb * haze.a * (1.0 - out_color.a)) / max(a, 1e-5), a);
+#endif
+    }
+
 #if BUGS_DEBUG_TIME
     // Calibration: paints floor(time) as 8 red digits across the glass (the shader's own clock, in seconds).
     // Read the number right after the scenario has loaded and put it into bugs_start_time.
@@ -495,11 +513,11 @@ void main()
     }
 #endif
 
+    // the velocity of the glass, as any material writes it, over what the scene behind wrote
     if (MOTIONBLUR_ENABLED)
     {
-        // alpha 0 = blending keeps the scene's own motion vectors
-        // only the see-through parts of the bugs (smear); no blur over opaque parts of the pane (1 - glassA)
-        float blurMask = clamp(smear * bugs_halo_blur * (1.0 - smoothstep(0.5, 0.95, glassA)), 0.0, 1.0);
-        out_motion = (blurMask >= 0.01) ? vec4(WS_ENC * blurMask, 0.0, 0.0, 1.0) : vec4(0.0);
+        vec2 a = (f_clip_future_pos.xy / f_clip_future_pos.w) * 0.5 + 0.5;
+        vec2 b = (f_clip_pos.xy / f_clip_pos.w) * 0.5 + 0.5;
+        out_motion = vec4(a - b, 0.0, clamp(out_color.a, 0.0, 1.0));
     }
 }

@@ -291,6 +291,11 @@ class opengl46_renderer : public gfx_renderer, public gfx::scene_walk {
 		std::unique_ptr<opengl_texture> ssr_tex;
 		std::unique_ptr<gl::framebuffer> ssr_fb;
 		int ssr_levels { 0 };
+		// the scene copied with its mipmaps before the glasses of the cab are drawn, which they see through (Setup_Scene_Copy()); made
+		// with the first copy
+		std::unique_ptr<opengl_texture> scenecopy_tex;
+		std::unique_ptr<gl::framebuffer> scenecopy_fb;
+		int scenecopy_levels { 0 };
 
         // LDR backbuffer for offscreen rendering
         std::unique_ptr<gl::framebuffer> backbuffer_fb;
@@ -445,6 +450,10 @@ class opengl46_renderer : public gfx_renderer, public gfx::scene_walk {
 	// resolves the depth drawn so far in the colour pass of the viewport for the soft particles (gfx.particles.soft) and binds it
 	// to gl::SCENE_DEPTH_TEX; false when the viewport has no such depth
 	bool Setup_Particles_Depth( viewport_config &Viewport );
+	// the scene drawn so far copied with its mipmaps for the glasses of the cab (SCENE_COPY_TEX), and its levels when it's made in this
+	// frame (0 otherwise, scene_ubs.rain_state.w)
+	bool Setup_Scene_Copy( viewport_config &Viewport );
+	float Scene_Copy_Levels( viewport_config const &Viewport ) const;
 	// the direction the sun shadows are cast in (the sun, its height capped by gfx.shadow.angle.min), and the rotation from
 	// the world to the space of the light of the cascades: x and y across the maps, z along the light
 	glm::vec3 Shadow_Light_Vector() const;

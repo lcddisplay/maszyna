@@ -199,6 +199,8 @@ std::array<std::array<VkImageView, vk14::bindings::PASS_BINDING_COUNT>, 3> pass_
 		views[SCENE_DEPTH_TEX] = (colour && (false == scene.targets.empty()) && scene.targets.front().scene_depth ? scene.targets.front().scene_depth->view() : scene.depth_empty->view());
 		// the image of the last frame of the main view, which the screen space reflections take their colour from
 		views[SSR_HISTORY_TEX] = (colour && (false == scene.targets.empty()) && scene.targets.front().ssr_history ? scene.targets.front().ssr_history->view() : scene.white->view());
+		// the scene of the main view copied before the glasses of the cab (setup_scene_copy()); until it's made, the history above
+		views[SCENE_COPY_TEX] = (colour && (false == scene.targets.empty()) && scene.targets.front().scene_copy ? scene.targets.front().scene_copy->view() : views[SSR_HISTORY_TEX]);
 		// the ambient occlusion of the main view the shading takes into the ambient light (the stage A3)
 		views[SCENE_AO_TEX] = (colour && (false == scene.targets.empty()) && scene.targets.front().ssao_blur ? scene.targets.front().ssao_blur->view() : scene.white->view());
 		// the probe of the cab, once it was drawn (the stage A4)
@@ -1118,6 +1120,7 @@ void vulkan14_renderer::write_pass_sets(vk14::instance_cull *Cull)
 		write(handle, HEADLIGHT_SHADOW_TEX, nullptr, image(ctx.sampling.shadow, views[HEADLIGHT_SHADOW_TEX]));
 		write(handle, SCENE_DEPTH_TEX, nullptr, image(ctx.sampling.clamp_nearest, views[SCENE_DEPTH_TEX]));
 		write(handle, SSR_HISTORY_TEX, nullptr, image(ctx.sampling.clamp_linear, views[SSR_HISTORY_TEX]));
+		write(handle, SCENE_COPY_TEX, nullptr, image(ctx.sampling.clamp_linear, views[SCENE_COPY_TEX]));
 		write(handle, SCENE_AO_TEX, nullptr, image(ctx.sampling.clamp_nearest, views[SCENE_AO_TEX]));
 		write(handle, CAB_PROBE_TEX, nullptr, image(ctx.sampling.clamp_linear, views[CAB_PROBE_TEX]));
 		write(handle, CAB_PROBE_ALBEDO_TEX, nullptr, image(ctx.sampling.clamp_linear, views[CAB_PROBE_ALBEDO_TEX]));

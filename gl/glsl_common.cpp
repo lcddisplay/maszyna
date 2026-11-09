@@ -104,6 +104,7 @@ void gl::glsl_common_setup()
     "#define CLOUD_HISTORY_TEX " + std::to_string(CLOUD_HISTORY_TEX) + "\n" +
     "#define SCENE_DEPTH_TEX " + std::to_string(SCENE_DEPTH_TEX) + "\n" +
     "#define SSR_HISTORY_TEX " + std::to_string(SSR_HISTORY_TEX) + "\n" +
+    "#define SCENE_COPY_TEX " + std::to_string(SCENE_COPY_TEX) + "\n" +
     "#define SCENE_AO_TEX " + std::to_string(SCENE_AO_TEX) + "\n" +
     "#define CAB_PROBE_TEX " + std::to_string(CAB_PROBE_TEX) + "\n" +
     "#define CAB_PROBE_ALBEDO_TEX " + std::to_string(CAB_PROBE_ALBEDO_TEX) + "\n" +

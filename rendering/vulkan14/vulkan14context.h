@@ -171,6 +171,9 @@ struct viewport_targets
 	// the screen space reflections (gfx.ssr, the main viewport): the finished image of the last frame with its mipmaps, which they take
 	// their colour from, and whether it was cleared once it was made (it's read before the first frame is copied to it)
 	std::shared_ptr<image> ssr_history;
+	// the scene of the main view copied with its mipmaps before the glasses of the cab are drawn, which they see through
+	// (vulkan14_renderer::setup_scene_copy(), SCENE_COPY_TEX); made with the first copy
+	std::shared_ptr<image> scene_copy;
 	bool ssr_cleared{false};
 	bool reflections{false}; // the history was asked for (it can be missing when it couldn't be made)
 	// the tonemapped image, before the chromatic aberration, and the one which goes to the window
