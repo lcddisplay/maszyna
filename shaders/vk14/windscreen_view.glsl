@@ -65,6 +65,21 @@ bool wsvInside(vec2 uv)
 	return (depth > 0.0) && (projection[3][2] / depth < -f_pos.z + WSV_INSIDE);
 }
 
+// the depth of the copy at Uv (reverse z, infinite far: znear / distance; 0 far / not known)
+float wsvDepth(vec2 uv)
+{
+	ivec2 size = textureSize(scene_depth, 0);
+	return texelFetch(scene_depth, clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1), 0).r;
+}
+
+// the place of depth Depth is in the same layer as the one behind the pixel (Base): not much nearer than it, as the cab (its
+// dashboard, the wipers, the frame) is nearer than the scene behind the glass. a drop over the wiper blade shows the blade, a drop
+// over the scene never pulls the blade or the dashboard in
+bool wsvSameLayer(float depth, float base)
+{
+	return depth <= max(base * 1.6, 0.02);
+}
+
 // the scene at Uv blurred by the haze of the glass, for a haze of BlurAmt (> 0): a disc of taps, rotated per pixel, of the scene
 // behind the glass only (not of the cab)
 vec3 wsvHaze(vec2 uv, float blurAmt)

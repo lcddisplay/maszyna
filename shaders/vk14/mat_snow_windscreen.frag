@@ -538,7 +538,7 @@ void main()
             vec2 slope = snowN.xy / max(snowA, 1e-3);
             vec2 bend  = clamp(-slope * snow_distort, vec2(-1.0), vec2(1.0)) * smoothstep(0.30, 0.60, thin);
             vec2 uv    = wsvUV(gl_FragCoord.xy - bend * SNOW_REFR_MAXPX);
-            if (false == wsvInside(uv))
+            if (wsvSameLayer(wsvDepth(uv), wsvDepth(wsvUV(gl_FragCoord.xy))))
             {
                 view = vec4(wsvFetch(uv, 0.0), SNOW_REFR_MIX);
                 over = true;

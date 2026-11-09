@@ -1045,14 +1045,20 @@ void main()
         vec3  seen;
         if (wsvCopy())
         {
+            // the picture of the copy where the drop looks; where that is nearer than the scene behind the drop (the cab) or off the
+            // screen, the picture right behind the drop: never the surroundings of the environment map, which lag behind the light
+            // of the scene (pale drops on a dark glass at night)
+            vec2  uv0   = wsvUV(gl_FragCoord.xy);
             vec2  uv    = wsvUV(gl_FragCoord.xy + shiftPx);
             vec2  edges = min(uv, 1.0 - uv);
             uv    = clamp(uv, vec2(0.0), vec2(1.0));
-            share = smoothstep(0.0, 0.04, min(edges.x, edges.y)) * (wsvInside(uv) ? 0.0 : 1.0);
-            seen  = mix(wsSurroundings(dir, lod), wsvFetch(uv, lod), share);
+            share = smoothstep(0.0, 0.04, min(edges.x, edges.y)) * (wsvSameLayer(wsvDepth(uv), wsvDepth(uv0)) ? 1.0 : 0.0);
+            // a sharper picture than the image of the last frame needed (its blur hid the grain of a minified picture): a level finer
+            float lodNow = max(lod - 1.0, 0.0);
+            seen  = mix(wsvFetch(uv0, lodNow), wsvFetch(uv, lodNow), share);
             // the glow only in the drops themselves, strongest in their middle where the lens bends most (the water film and the
             // rivulets between them would show it as flat squares around the headlights of an oncoming train)
-            seen += wsvLightGlow(uv) * (smoothstep(0.03, 0.2, length(lensBend * smoothstep(0.05, 0.35, coverA))) * share);
+            seen += wsvLightGlow(mix(uv0, uv, share)) * smoothstep(0.03, 0.2, length(lensBend * smoothstep(0.05, 0.35, coverA)));
             image = true;
         }
         else
