@@ -478,6 +478,17 @@ bool opengl46_renderer::AddViewport(const global_settings::extraviewport_config 
 	return ret;
 }
 
+namespace
+{
+// the format of the velocity targets: the velocity (r, g) in the precision of gfx.postfx.motionblur.format, and the reactive mask
+// (b: the share of the pixel a glass with a picture of its own drew, which the temporal anti-aliasing keeps less of the history
+// of; a the alpha of the blending)
+GLenum velocity_format()
+{
+	return (Global.gfx_postfx_motionblur_format == GL_RG32F) ? GL_RGBA32F : GL_RGBA16F;
+}
+} // namespace
+
 bool opengl46_renderer::init_viewport(viewport_config &vp)
 {
     if (vp.initialized)
@@ -559,7 +570,7 @@ bool opengl46_renderer::init_viewport(viewport_config &vp)
 			if (Global.gfx_motion_vectors())
 			{
 				vp.main_texv = std::make_unique<opengl_texture>();
-				vp.main_texv->alloc_rendertarget(Global.gfx_postfx_motionblur_format, GL_RG, vp.width, vp.height);
+				vp.main_texv->alloc_rendertarget(velocity_format(), GL_RGBA, vp.width, vp.height);
 				vp.main_fb->attach(*vp.main_texv, GL_COLOR_ATTACHMENT1);
 			}
 
@@ -572,7 +583,7 @@ bool opengl46_renderer::init_viewport(viewport_config &vp)
 		if (Global.gfx_motion_vectors())
 		{
 			vp.msaa_rbv = std::make_unique<gl::renderbuffer>();
-			vp.msaa_rbv->alloc(Global.gfx_postfx_motionblur_format, vp.width, vp.height, samples);
+			vp.msaa_rbv->alloc(velocity_format(), vp.width, vp.height, samples);
 			vp.msaa_fb->attach(*vp.msaa_rbv, GL_COLOR_ATTACHMENT1);
 
 			if (Global.gfx_postfx_motionblur_enabled)
@@ -5454,6 +5465,9 @@ bool opengl46_renderer::Setup_Scene_Copy(viewport_config &Viewport)
 	auto const scissor{::glIsEnabled(GL_SCISSOR_TEST) == GL_TRUE};
 	if (scissor)
 		::glDisable(GL_SCISSOR_TEST);
+	// the colour: the read buffer of the framebuffer is its own state, and the resolve of the velocity (gl::framebuffer::blit) leaves
+	// it on the velocity, which the copy took instead of the scene (black glasses)
+	::glNamedFramebufferReadBuffer(*Viewport.msaa_fb, GL_COLOR_ATTACHMENT0);
 	::glBlitNamedFramebuffer(*Viewport.msaa_fb, *Viewport.scenecopy_fb, 0, 0, Viewport.width, Viewport.height, 0, 0, Viewport.width, Viewport.height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 	if (scissor)
 		::glEnable(GL_SCISSOR_TEST);

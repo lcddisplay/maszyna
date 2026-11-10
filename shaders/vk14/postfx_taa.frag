@@ -11,7 +11,7 @@ layout(location = 0) out vec4 out_color;
 #pragma texture(color_tex, 0, RGB)
 layout(set = POST_SET, binding = POST_TEXTURE_FIRST + 0) uniform sampler2D color_tex;
 
-#pragma texture(velocity_tex, 1, RG)
+#pragma texture(velocity_tex, 1, RGB)
 layout(set = POST_SET, binding = POST_TEXTURE_FIRST + 1) uniform sampler2D velocity_tex;
 
 #pragma texture(depth_tex, 2, R)

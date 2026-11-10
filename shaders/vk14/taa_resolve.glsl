@@ -14,6 +14,11 @@
 
 // the share of the frame in the result
 const float TAA_CURRENT_SHARE = 0.1;
+// the pixels a glass with a picture of its own drew (the reactive mask, the blue of the velocity: the drops, the haze, the snow and
+// the insects of the windscreens): their picture changes from frame to frame (the drops bend the scene going by behind them), so
+// less of the history is kept, held closer to the colours around, and nothing locks
+const float TAA_REACTIVE_SHARE = 0.3;
+const float TAA_REACTIVE_VARIANCE = 0.5;
 // the history kept within this many standard deviations of the colours around the pixel: wide for a pixel standing still on the
 // screen, narrow for one moving across it this many pixels a frame
 const float TAA_VARIANCE_WIDE = 1.5;
@@ -152,6 +157,11 @@ void main()
 	float difference = length((moved - worlduv) * size);
 	bool still = (world.w > 0.0) && ((depth <= 0.0) || (difference < max(TAA_STILL_PIXELS, 0.01 * length((moved - f_coords) * size))));
 	vec2 uv = still ? worlduv : moved;
+	// a glass with a picture of its own: the picture sits on the glass, which goes with the velocity drawn at the pixel itself
+	float reactive = clamp(texelFetch(velocity_tex, pixel, 0).b, 0.0, 1.0);
+	reactive = isnan(reactive) ? 0.0 : reactive;
+	if (reactive > 0.5)
+		uv = f_coords + texelFetch(velocity_tex, pixel, 0).xy;
 	if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0))))
 	{
 		// out of the last frame: the frame alone
@@ -171,14 +181,14 @@ void main()
 	lock = max(lock - TAA_LOCK_DECAY, line ? 1.0 : 0.0);
 	float distance = (depth > 0.0) ? TAA_NEAR / depth : TAA_LOCK_DISTANCE_FULL;
 	lock *= (still ? 1.0 : 0.0) * (1.0 - smoothstep(TAA_LOCK_SPEED_MIN, TAA_LOCK_SPEED_MAX, speed)) *
-	        smoothstep(TAA_LOCK_DISTANCE_MIN, TAA_LOCK_DISTANCE_FULL, distance);
+	        smoothstep(TAA_LOCK_DISTANCE_MIN, TAA_LOCK_DISTANCE_FULL, distance) * (1.0 - reactive);
 
 	// the history within the colours around the pixel, but where it's locked
 	vec3 mean = m1 / 9.0;
 	vec3 deviation = sqrt(max(m2 / 9.0 - mean * mean, vec3(0.0)));
-	float gamma = mix(TAA_VARIANCE_WIDE, TAA_VARIANCE_NARROW, clamp(speed / TAA_SPEED_NARROW, 0.0, 1.0));
+	float gamma = mix(mix(TAA_VARIANCE_WIDE, TAA_VARIANCE_NARROW, clamp(speed / TAA_SPEED_NARROW, 0.0, 1.0)), TAA_REACTIVE_VARIANCE, reactive);
 	history = mix(taa_clip(history, mean, gamma * deviation), history, lock);
 
-	vec3 result = mix(history, current, TAA_CURRENT_SHARE);
+	vec3 result = mix(history, current, mix(TAA_CURRENT_SHARE, TAA_REACTIVE_SHARE, reactive));
 	out_color = vec4(taa_clean(taa_decompress(clamp(taa_rgb(result), vec3(0.0), vec3(1.0 - 1.0 / TAA_HALF_MAX)))), lock);
 }

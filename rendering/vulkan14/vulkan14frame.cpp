@@ -367,7 +367,10 @@ bool make_targets(vk14::allocator &Memory, vk14::deletion_queue &Deletions, std:
 		return true;
 	};
 	auto const hdr{VK_FORMAT_R16G16B16A16_SFLOAT};
-	auto const velocity{VK_FORMAT_R16G16_SFLOAT};
+	// the velocity (x, y) and the reactive mask (z: the share of the pixel a glass with a picture of its own drew, which the temporal
+	// anti-aliasing keeps less of the history of; w the alpha of the blending)
+	auto const velocity{VK_FORMAT_R16G16B16A16_SFLOAT};
+	auto const dlssvelocity{VK_FORMAT_R16G16_SFLOAT};
 	auto const depth{VK_FORMAT_D32_SFLOAT};
 	auto const sampledcolour{VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT};
 	auto ok{true};
@@ -421,7 +424,7 @@ bool make_targets(vk14::allocator &Memory, vk14::deletion_queue &Deletions, std:
 	{
 		// what dlss takes besides the scene, and its output, which the post-processing reads (and the history of the reflections is
 		// copied from)
-		ok = ok && make(Targets.dlss_motion, velocity, sampledcolour, VK_SAMPLE_COUNT_1_BIT, "dlss velocity") && make(Targets.dlss_exposure, VK_FORMAT_R32_SFLOAT, sampledcolour, VK_SAMPLE_COUNT_1_BIT, "dlss exposure", VkExtent2D{1, 1}) &&
+		ok = ok && make(Targets.dlss_motion, dlssvelocity, sampledcolour, VK_SAMPLE_COUNT_1_BIT, "dlss velocity") && make(Targets.dlss_exposure, VK_FORMAT_R32_SFLOAT, sampledcolour, VK_SAMPLE_COUNT_1_BIT, "dlss exposure", VkExtent2D{1, 1}) &&
 		     make(Targets.dlss_output, hdr, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | historysource, VK_SAMPLE_COUNT_1_BIT, "dlss output", outputextent);
 	}
 	// the ambient occlusion, half the size, when it's on
