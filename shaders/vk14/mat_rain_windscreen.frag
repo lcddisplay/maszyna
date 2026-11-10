@@ -262,6 +262,74 @@ vec3 wsLightGlow(vec3 direction, float distance)
     return min(excess, vec3(30.0)) * (2.0 * WS_LIGHT_GAIN);
 }
 
+// ---------------------------------------------------------------------------------------------------------------------------
+// the drops as the post-processing drew them before the copy of the scene (rain_windscreen_haze.glsl, wsDropRefraction()): the
+// sharp picture (level 0) where the drop looks, a footprint of 4 x 4 where the lens shrinks it (no hatch), and the lights near the
+// drop from the image of the last frame (ssr_history: the drops lit in it light the ones next to them, the glow spreads around a
+// signal as it did). the copy of the scene only stands in for the picture of the frame the post-processing bent
+// ---------------------------------------------------------------------------------------------------------------------------
+const float WS_LENS_AA = 0.75;   // above this spread of the picture between neighbouring pixels, a 4x4 footprint is averaged
+
+vec3 wsDropPicture(vec2 uv, vec2 jx, vec2 jy)
+{
+    if (length(jx) + length(jy) < WS_LENS_AA)
+        return wsvFetch(uv, 0.0);
+    vec2  texel = 1.0 / vec2(textureSize(scene_copy, 0));
+    vec2  fx    = clamp(vec2(1.0, 0.0) - jx, vec2(-10.0), vec2(10.0));
+    vec2  fy    = clamp(vec2(0.0, 1.0) - jy, vec2(-10.0), vec2(10.0));
+    vec3  acc   = vec3(0.0);
+    float wacc  = 0.0;
+    for (int j = 0; j < 4; ++j)
+    {
+        for (int i = 0; i < 4; ++i)
+        {
+            vec2  t = (vec2(float(i), float(j)) + 0.5) / 4.0 - 0.5;
+            vec3  c = wsvFetch(uv + (fx * t.x + fy * t.y) * texel, 0.0);
+            float w = wsvKaris(c);
+            acc  += c * w;
+            wacc += w;
+        }
+    }
+    return acc / wacc;
+}
+
+// the image of the last frame around Uv as blurred as its level Lod, but round (as wsvRound())
+vec3 wsHistoryRound(vec2 uv, float lod)
+{
+    float level  = min(lod, ssr_params2.x);
+    float finer  = max(level - 1.0, 0.0);
+    vec2  pixel  = 1.0 / vec2(textureSize(ssr_history, 0));
+    float radius = 0.6 * exp2(level);
+    vec3  sum    = wsvSafe(textureLod(ssr_history, uv, finer).rgb) * 0.2;
+    for (int i = 0; i < 8; ++i)
+    {
+        float a = (float(i) + 0.5) * 0.7853982;
+        sum += wsvSafe(textureLod(ssr_history, uv + vec2(cos(a), sin(a)) * radius * pixel, finer).rgb) * 0.06;
+        sum += wsvSafe(textureLod(ssr_history, uv + vec2(cos(a + 0.3927), sin(a + 0.3927)) * (2.0 * radius) * pixel, finer).rgb) * 0.04;
+    }
+    return sum;
+}
+
+vec3 wsHistoryExcess(vec2 uv, float lod, vec3 wide)
+{
+    vec3 excess = max(wsHistoryRound(uv, lod) - wide * WSV_LIGHT_CONTRAST, vec3(0.0));
+    return excess * clamp(wsvLum(excess) / (2.0 * WSV_LIGHT_MIN_LUM), 0.0, 1.0);
+}
+
+// the lights near the drop at Uv (its own place on the screen); without the image of the last frame (no gfx.ssr) from the copy
+vec3 wsDropLights(vec2 uv)
+{
+    if ((ssr_params.x < 1.0) || (textureSize(ssr_history, 0).x < 16))
+        return wsvLightGlow(uv);
+    if (WSV_LIGHT_GAIN <= 0.0)
+        return vec3(0.0);
+    vec3  wide = wsHistoryRound(uv, WSV_LIGHT_WIDE);
+    vec3  mid  = wsHistoryExcess(uv, WSV_LIGHT_MID, wide);
+    float midF = clamp(wsvLum(mid) / (2.0 * WSV_LIGHT_MIN_LUM), 0.0, 1.0);
+    vec3  glow = (wsHistoryExcess(uv, WSV_LIGHT_FINE, wide) + WSV_LIGHT_MID_SHARE * mid * midF) * WSV_LIGHT_GAIN;
+    return glow * min(1.0, WSV_LIGHT_CAP / max(wsvLum(glow), 1e-4));
+}
+
 // a layer Over put over Under, the colours not premultiplied
 vec4 wsOver(vec4 over, vec4 under)
 {
@@ -1030,11 +1098,35 @@ void main()
     if (wsvCopy() && (hazeA > 0.0025))
         under = vec4(wsvHaze(wsvUV(gl_FragCoord.xy), blurAmt), hazeA);
 
-    // the drops: the view bent (the picture shift worked out above), and the lights near them. the scene of this frame (its copy,
-    // windscreen_view.glsl), whose depth tells the dashboard, the frame and the roof of the cab, which are never pulled into a drop;
-    // the image of the last frame is only the fallback (the views without the cab)
+    // the drops (rivulets and droplets too), with the copy of the scene: as the post-processing drew them (wsDropPicture(),
+    // wsDropLights()): the picture shift of a drop as it was sent to it, the spread of the picture from the neighbouring pixels
+    vec2  dropBend = lensBend * smoothstep(0.05, 0.35, coverA);
+    float dropPx   = (((coverA > 0.05) || (alphaOut > 0.05)) && (glassA < 0.5)) ? 1.0 : 0.0;
+    vec2  bendDx   = dFdx(dropBend) * WS_REFR_MAXPX;
+    vec2  bendDy   = dFdy(dropBend) * WS_REFR_MAXPX;
+    float dropDx   = dFdx(dropPx);
+    float dropDy   = dFdy(dropPx);
+    vec3  dropGlow = vec3(0.0);
+    if (wsvCopy() && (dropPx > 0.5))
+    {
+        vec2 uv0 = wsvUV(gl_FragCoord.xy);
+        // never the cab (the dashboard, the frame, the roof): where the drop looks at it (near the top and the bottom of the glass)
+        // or off the screen, the edge of the scene on the way there (wsvReach), so those drops are lenses too and not flat grey
+        // patches of their look (the post-processing left the pixel as it was there)
+        vec2 uv2 = wsvReach(uv0, wsvUV(gl_FragCoord.xy - dropBend * WS_REFR_MAXPX));
+        // a neighbour that isn't a drop doesn't count in the spread
+        vec2 jx = (abs(dropDx) < 0.5) ? bendDx : vec2(0.0);
+        vec2 jy = (abs(dropDy) < 0.5) ? bendDy : vec2(0.0);
+        bent = vec4(wsDropPicture(uv2, jx, jy), WS_REFR_MIX);
+        // the glow only in the drops themselves, strongest in their middle where the lens bends most
+        float glowW = smoothstep(0.03, 0.2, length(dropBend));
+        if (glowW > 0.0)
+            dropGlow = wsDropLights(uv0) * glowW;
+    }
+
+    // without the copy (the views without the cab): the image of the last frame
     float refrA = smoothstep(0.05, 0.35, coverA) * glassClear * step(glassA, 0.5);
-    if (refrA > 0.001)
+    if ((false == wsvCopy()) && (refrA > 0.001))
     {
         vec2  shiftPx = -lensBend * WS_REFR_MAXPX;                         // where the drop looks, screen pixels
         vec3  dir     = normalize(wsView + shiftPx.x * wsDvx + shiftPx.y * wsDvy);
@@ -1042,31 +1134,9 @@ void main()
         float lod     = clamp(log2(1.0 + lensK * drop_lens_mix) - 0.5, 0.0, 3.0)
                       + clamp(2.5 - log2(max(lensRadPx, 1.0)), 0.0, 1.5);
         float share;
-        vec3  seen;
-        if (wsvCopy())
-        {
-            // the picture of the copy where the drop looks; where that is nearer than the scene behind the drop (the cab) or off the
-            // screen, the picture right behind the drop: never the surroundings of the environment map, which lag behind the light
-            // of the scene (pale drops on a dark glass at night)
-            vec2  uv0   = wsvUV(gl_FragCoord.xy);
-            vec2  uv    = wsvUV(gl_FragCoord.xy + shiftPx);
-            vec2  edges = min(uv, 1.0 - uv);
-            uv    = clamp(uv, vec2(0.0), vec2(1.0));
-            share = smoothstep(0.0, 0.04, min(edges.x, edges.y)) * (wsvSameLayer(wsvDepth(uv), wsvDepth(uv0)) ? 1.0 : 0.0);
-            // a sharper picture than the image of the last frame needed (its blur hid the grain of a minified picture): a level finer
-            float lodNow = max(lod - 1.0, 0.0);
-            seen  = mix(wsvFetch(uv0, lodNow), wsvFetch(uv, lodNow), share);
-            // the glow only in the drops themselves, strongest in their middle where the lens bends most (the water film and the
-            // rivulets between them would show it as flat squares around the headlights of an oncoming train)
-            seen += wsvLightGlow(mix(uv0, uv, share)) * smoothstep(0.03, 0.2, length(lensBend * smoothstep(0.05, 0.35, coverA)));
-            image = true;
-        }
-        else
-        {
-            seen = wsBehind(dir, lod, background, share, true);
-            if (image && (WS_LIGHT_GAIN > 0.0))
-                seen += wsLightGlow(wsView, background);
-        }
+        vec3  seen = wsBehind(dir, lod, background, share, true);
+        if (image && (WS_LIGHT_GAIN > 0.0))
+            seen += wsLightGlow(wsView, background);
         // without the image the surroundings stand in: only faintly, they aren't the scene behind
         bent = vec4(seen, refrA * WS_REFR_MIX * (image ? 1.0 : 0.3));
     }
@@ -1089,13 +1159,19 @@ void main()
             legacy_gloss();
             fragcolor = apply_lights(fragcolor, fragnormal, tex_color.rgb, reflectivity, specularity, shadow_tone);
         }
-        vec4 color = vec4(fragcolor, glassA);
-        out_color.xyz = apply_fog(mix(out_color.xyz, color.xyz, color.a));
-        out_color.a = mix(out_color.a, 1., color.a);
+        // the fog only on the glass itself: the haze and the drops show the scene (its copy), which has its fog already. fogged
+        // once more (the fog of the volume at the glass is that of its whole first slice, metres deep) the wet glass came out
+        // darker than the place a blade had just wiped. the glass laid over the layers under it as a layer too: mixed into them
+        // its colour counted once on the haze (alpha 1) but only by its alpha squared on the clear glass (alpha 0), so a hazy
+        // glass and a wiped one differed by the tint of the glass. by its alpha squared everywhere, as the clear glass always had it
+        out_color = wsOver(vec4(apply_fog(fragcolor) * glassA, glassA), out_color);
     }
     // the picture in the drops goes over the drop shading and the glass, as the old postfx replaced the pixel with it: the dark
     // middle of the atlas only shows through faintly, the rim and the glints a little more
     out_color = wsOver(bent, out_color);
+    // the lights in the drops at full strength, as the post-processing added them (the blend multiplies by the alpha)
+    if (wsvLum(dropGlow) > 0.0)
+        out_color.rgb += dropGlow / max(out_color.a, 0.02);
     if (!POSTFX_ENABLED)
         out_color = tonemap(out_color);
 

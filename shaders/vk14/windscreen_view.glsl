@@ -80,6 +80,25 @@ bool wsvSameLayer(float depth, float base)
 	return depth <= max(base * 1.6, 0.02);
 }
 
+// where a drop at Uv0 looking at Uv sees the scene: Uv on the screen, or, where Uv is the cab (its roof, its dashboard, the frame
+// of the glass) or off the screen, the farthest place on the way to it that is still the scene behind the glass. the scene a drop
+// near the edge of the glass shows beyond the roof or below the dashboard isn't on the screen; its edge stands in for it, so the
+// drops there are lenses too and not flat patches of the colour right behind them
+const int WSV_REACH_STEPS = 6;
+
+vec2 wsvReach(vec2 uv0, vec2 uv)
+{
+	float base = wsvDepth(uv0);
+	vec2  far  = clamp(uv, vec2(0.0), vec2(1.0));
+	for (int i = 0; i < WSV_REACH_STEPS; ++i)
+	{
+		vec2 p = mix(uv0, far, 1.0 - float(i) / float(WSV_REACH_STEPS));
+		if (wsvSameLayer(wsvDepth(p), base))
+			return p;
+	}
+	return uv0;
+}
+
 // the scene at Uv blurred by the haze of the glass, for a haze of BlurAmt (> 0): a disc of taps, rotated per pixel, of the scene
 // behind the glass only (not of the cab)
 vec3 wsvHaze(vec2 uv, float blurAmt)
