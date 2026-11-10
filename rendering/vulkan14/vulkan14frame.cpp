@@ -3029,10 +3029,14 @@ bool vulkan14_renderer::setup_scene_copy(std::size_t const Index)
 	}
 	auto const width{static_cast<std::int32_t>(targets.extent.width)};
 	auto const height{static_cast<std::int32_t>(targets.extent.height)};
-	if ((false == bool(targets.scene_copy)) || (targets.scene_copy->desc().extent.width != targets.extent.width) || (targets.scene_copy->desc().extent.height != targets.extent.height))
+	if ((false == bool(targets.scene_copy)) || (targets.scene_copy->desc().extent.width != targets.extent.width) || (targets.scene_copy->desc().extent.height != targets.extent.height) ||
+	    (targets.scene_copy->desc().format != targets.colour->desc().format))
 	{
 		vk14::image_desc desc;
-		desc.format = ctx.scene.history_format;
+		// the format of the colour drawn (as the copy of the opengl renderer): the packed format of the history of the reflections
+		// (b10g11r11) lost the low bits of the colour, and the glass seen through it (the haze, the drops) came out darker and of
+		// another tint than the clear glass beside it (a jump in brightness where the blades go)
+		desc.format = targets.colour->desc().format;
 		desc.extent = {targets.extent.width, targets.extent.height, 1};
 		desc.mips = static_cast<std::uint32_t>(std::floor(std::log2(static_cast<float>(std::max(width, height))))) + 1;
 		desc.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
