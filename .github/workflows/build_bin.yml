@@ -49,9 +49,6 @@ jobs:
           - name: "AVX2"
             suffix: "avx2"
             cmake_flags: "-DENABLE_AVX2=ON"
-          - name: "No AVX2"
-            suffix: "noavx2"
-            cmake_flags: "-DENABLE_AVX2=OFF"
 
     steps:
       - name: Checkout repository
@@ -131,6 +128,7 @@ jobs:
           cmake -S . -B build `
             -G "Visual Studio 17 2022" `
             -A x64 `
+            -DWITH_TESTS=OFF `
             "-DPython3_ROOT_DIR=$pythonRoot" `
             ${{ matrix.variant.cmake_flags }}
 
@@ -370,6 +368,8 @@ jobs:
 
   linux:
     name: Linux x64 / GCC / ${{ matrix.variant.name }}
+    # this build branch makes the Windows AVX2 build only
+    if: false
     runs-on: ubuntu-24.04
     # see the notes above the windows job: two variants, each with a concurrency group of its own
     concurrency:
@@ -563,7 +563,7 @@ jobs:
 
   publish:
     name: Publish public download
-    needs: [windows, linux]
+    needs: [windows]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     permissions:
@@ -573,47 +573,17 @@ jobs:
       cancel-in-progress: false
 
     steps:
-      # the AVX2 build keeps the old name of the download, so the links already handed out still work
+      # this build branch makes the Windows AVX2 build only
       - name: Download Windows build (AVX2)
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: maszyna-windows-x64-avx2-${{ env.CONFIG_WIN }}
           path: dist/maszyna-windows-x64
 
-      - name: Download Windows build (no AVX2)
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: maszyna-windows-x64-noavx2-${{ env.CONFIG_WIN }}
-          path: dist/maszyna-windows-x64-noavx2
-
-      - name: Download Linux build (AVX2)
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: maszyna-linux-x64-avx2-${{ env.CONFIG_LINUX }}
-          path: dist/maszyna-linux-x64
-
-      - name: Download Linux build (no AVX2)
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: maszyna-linux-x64-noavx2-${{ env.CONFIG_LINUX }}
-          path: dist/maszyna-linux-x64-noavx2
-
       - name: Pack
         run: |
           cd dist
-
-          # the artifacts lose the executable bit
-          for dir in maszyna-linux-x64 maszyna-linux-x64-noavx2; do
-            find "$dir" -type f -exec sh -c 'file -b "$1" | grep -q "^ELF" && chmod +x "$1"' _ {} \;
-            if [ -d "$dir/linuxpython64/bin" ]; then
-              chmod +x "$dir"/linuxpython64/bin/*
-            fi
-          done
-
           (cd maszyna-windows-x64 && zip -qr9 ../maszyna-windows-x64.zip .)
-          (cd maszyna-windows-x64-noavx2 && zip -qr9 ../maszyna-windows-x64-noavx2.zip .)
-          tar -czf maszyna-linux-x64.tar.gz -C maszyna-linux-x64 .
-          tar -czf maszyna-linux-x64-noavx2.tar.gz -C maszyna-linux-x64-noavx2 .
           ls -la
 
       - name: Publish rolling release of the branch
@@ -627,32 +597,19 @@ jobs:
           slug="$(printf '%s' "$BRANCH" | tr '/ ' '--' | tr -cd '[:alnum:]._-')"
           tag="build-$slug"
           base="${{ github.server_url }}/${{ github.repository }}/releases/download/$tag"
-
           notes="$(printf '%s\n' \
             "Automatic build of branch \`$BRANCH\`, commit $SHA, replaced by every push to the branch." \
             "" \
             "Download without a GitHub account:" \
             "- Windows: $base/maszyna-windows-x64.zip" \
-            "- Windows, CPUs without AVX2 (older than Haswell, 2013): $base/maszyna-windows-x64-noavx2.zip" \
-            "- Linux: $base/maszyna-linux-x64.tar.gz" \
-            "- Linux, CPUs without AVX2: $base/maszyna-linux-x64-noavx2.tar.gz" \
             "" \
             "Unpack over a MaSzyna installation (the game data isn't included). Build log: $RUN_URL")"
-
           gh release delete "$tag" --yes --cleanup-tag || true
           gh release create "$tag" \
             dist/maszyna-windows-x64.zip \
-            dist/maszyna-windows-x64-noavx2.zip \
-            dist/maszyna-linux-x64.tar.gz \
-            dist/maszyna-linux-x64-noavx2.tar.gz \
             --target "$SHA" \
             --prerelease \
             --latest=false \
             --title "Build: $BRANCH" \
             --notes "$notes"
-
-          echo "### Public download" >> "$GITHUB_STEP_SUMMARY"
           echo "- Windows: $base/maszyna-windows-x64.zip" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Windows, no AVX2: $base/maszyna-windows-x64-noavx2.zip" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Linux: $base/maszyna-linux-x64.tar.gz" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Linux, no AVX2: $base/maszyna-linux-x64-noavx2.tar.gz" >> "$GITHUB_STEP_SUMMARY"
